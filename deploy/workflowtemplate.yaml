@@ -24,7 +24,7 @@ spec:
       value: "42"
     - name: image
       # Updated automatically by CI on every push to main (see .github/workflows/ci.yaml).
-      value: ghcr.io/monstre0731/argo-streak-detection:latest
+      value: ghcr.io/monstre0731/argo-streak-detection:sha-6136732
 
   # One shared volume per workflow run, mounted at /data in every step.
   # On kind it is a local-path volume, so all steps are scheduled on the same node.
