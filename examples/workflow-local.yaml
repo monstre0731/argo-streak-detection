@@ -1,0 +1,19 @@
+# One run with an image built on your machine and loaded into kind (make kind-load).
+# Use this to try code changes before pushing them.
+#   kubectl create -f examples/workflow-local.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: streak-pipeline-local-
+  namespace: argo
+spec:
+  workflowTemplateRef:
+    name: streak-pipeline
+  arguments:
+    parameters:
+    - name: n-frames
+      value: "12"
+    - name: seed
+      value: "42"
+    - name: image
+      value: argo-streak-detection:dev

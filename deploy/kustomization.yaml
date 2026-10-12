@@ -1,0 +1,9 @@
+# Everything Argo CD keeps in sync with the cluster.
+# Argo CD renders this folder with Kustomize and applies the result to the argo namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- rbac.yaml
+- workflowtemplate.yaml
+- cronworkflow.yaml
+- smoke-test.yaml

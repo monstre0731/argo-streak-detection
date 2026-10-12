@@ -9,5 +9,6 @@ COPY pipeline/ pipeline/
 ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data
 
-# Argo passes the subcommand as args, e.g. ["calibrate", "--frame", "frame-003"]
+# The Argo templates set command: [python, -m, pipeline] explicitly (the emissary executor
+# needs it for images that are not in a registry) and pass the step as args.
 ENTRYPOINT ["python", "-m", "pipeline"]

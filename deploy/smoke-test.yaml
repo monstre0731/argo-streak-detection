@@ -1,0 +1,20 @@
+# A short pipeline run that Argo CD starts after every successful sync (a PostSync hook).
+# So every deployment is verified end to end: if the new image cannot run the pipeline,
+# the sync is marked as failed in Argo CD.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: streak-pipeline-smoke-test
+  namespace: argo
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation   # replace the previous run
+spec:
+  workflowTemplateRef:
+    name: streak-pipeline
+  arguments:
+    parameters:
+    - name: n-frames
+      value: "6"
+    - name: seed
+      value: "7"

@@ -1,9 +1,22 @@
+# CI/CD for the streak pipeline.
+#
+#   every push / PR      test ──────────────► (stop here on pull requests)
+#   push to main         test → image → release
+#                                  │         │
+#                                  │         └─ writes the new image tag into deploy/ and commits it;
+#                                  │            Argo CD sees the commit and deploys it to the cluster
+#                                  └─ builds a multi-arch image and pushes it to GHCR
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -13,13 +26,20 @@ jobs:
     - uses: actions/setup-python@v5
       with:
         python-version: "3.12"
+        cache: pip
     - run: pip install -r requirements.txt pytest pyyaml
     - name: Unit tests
       run: python -m pytest -q
     - name: End-to-end run without Kubernetes
       run: python -m pipeline --data-dir ./out run-local --n-frames 20 --seed 1
-    - name: Check the Kubernetes YAML parses
-      run: python -c "import yaml,glob; [list(yaml.safe_load_all(open(f))) for f in glob.glob('k8s/*.yaml')]; print('ok')"
+    - name: Check that every manifest parses
+      run: |
+        python -c "import yaml,glob; files=glob.glob('deploy/*.yaml')+glob.glob('argocd/*.yaml')+glob.glob('examples/*.yaml'); [list(yaml.safe_load_all(open(f))) for f in files]; print(len(files), 'files ok')"
+    - name: Lint the Argo Workflows manifests
+      run: |
+        curl -sSL -o argo.gz https://github.com/argoproj/argo-workflows/releases/latest/download/argo-linux-amd64.gz
+        gunzip argo.gz && chmod +x argo
+        ./argo lint --offline deploy/workflowtemplate.yaml deploy/cronworkflow.yaml deploy/smoke-test.yaml examples/workflow.yaml
     - uses: actions/upload-artifact@v4
       with:
         name: sample-report
@@ -27,21 +47,24 @@ jobs:
 
   image:
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
     steps:
     - uses: actions/checkout@v4
-    - id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ghcr.io/${{ github.repository }}
-        tags: |
-          type=sha
-          type=raw,value=latest,enable={{is_default_branch}}
+    - id: ref
+      name: Compute the image reference
+      run: |
+        repo="${GITHUB_REPOSITORY,,}"
+        echo "image=ghcr.io/${repo}:sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        echo "latest=ghcr.io/${repo}:latest" >> "$GITHUB_OUTPUT"
+    - uses: docker/setup-qemu-action@v3      # lets the amd64 runner build an arm64 image too
+    - uses: docker/setup-buildx-action@v3
     - uses: docker/login-action@v3
-      if: github.event_name == 'push'
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -49,5 +72,37 @@ jobs:
     - uses: docker/build-push-action@v6
       with:
         context: .
-        push: ${{ github.event_name == 'push' }}
-        tags: ${{ steps.meta.outputs.tags }}
+        platforms: linux/amd64,linux/arm64   # arm64 for kind on Apple-silicon Macs
+        push: true
+        provenance: false
+        tags: |
+          ${{ steps.ref.outputs.image }}
+          ${{ steps.ref.outputs.latest }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  release:
+    needs: image
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+    - name: Point the WorkflowTemplate at the new image
+      env:
+        IMAGE: ${{ needs.image.outputs.image }}
+      run: |
+        # change only the image line, so the commit diff stays one line long
+        sed -i -E "s#^( *value: )ghcr\.io/[^ ]*/argo-streak-detection:[^ ]*\$#\\1${IMAGE}#" deploy/workflowtemplate.yaml
+        git diff
+    - name: Commit the change (Argo CD deploys it)
+      env:
+        IMAGE: ${{ needs.image.outputs.image }}
+      run: |
+        if git diff --quiet; then echo "nothing to release"; exit 0; fi
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git commit -am "deploy: ${IMAGE##*:} [skip ci]"
+        git pull --rebase   # in case someone pushed while the image was building
+        git push

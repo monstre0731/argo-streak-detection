@@ -1,5 +1,5 @@
-# One run of the pipeline. Submit it as many times as you like:
-#   kubectl create -f k8s/workflow.yaml
+# One run of the pipeline with the image CI last deployed.
+#   kubectl create -f examples/workflow.yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:

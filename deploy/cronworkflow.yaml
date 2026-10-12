@@ -1,5 +1,5 @@
 # Optional: run the pipeline automatically every night, like a real observing schedule.
-#   kubectl apply -f k8s/cronworkflow.yaml
+# Deployed by Argo CD together with the rest of deploy/.
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:

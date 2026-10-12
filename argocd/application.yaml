@@ -1,0 +1,22 @@
+# Tells Argo CD: keep the argo namespace in sync with the deploy/ folder of this repo.
+#   kubectl apply -f argocd/application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: streak-pipeline
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/monstre0731/argo-streak-detection.git
+    targetRevision: main
+    path: deploy
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo
+  syncPolicy:
+    automated:
+      prune: true       # resources removed from Git are removed from the cluster
+      selfHeal: true    # manual changes in the cluster are reverted to match Git
+    syncOptions:
+    - ServerSideApply=true

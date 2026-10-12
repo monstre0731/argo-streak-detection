@@ -1,21 +1,49 @@
 # argo-streak-detection
 
-A small space-domain-awareness pipeline that finds satellite streaks in telescope images, orchestrated with **Argo Workflows** on **Kubernetes**.
+A small space-domain-awareness pipeline that finds satellite streaks in telescope images, run end to end the way a production data platform would be:
 
-Each batch of frames is calibrated and searched for objects **in parallel**, one branch per frame, then combined into a single report scored against ground truth.
+- **Argo Workflows** runs the image-processing pipeline on Kubernetes, one parallel branch per frame.
+- **GitHub Actions** tests every change, builds a multi-arch container image and publishes it to GHCR.
+- **Argo CD** deploys the pipeline from Git (GitOps) and runs a smoke test after every deployment.
+
+A `git push` is all it takes to ship a new version of the pipeline.
 
 ![Raw frame and calibrated frame with detections](docs/example.png)
 
 *Left: a raw simulated frame with a sensor gradient, hot pixels and read noise. Right: the same frame after calibration, with 27 stars (blue) and one satellite streak (orange) detected.*
 
-## What the pipeline does
+## The GitOps loop
 
-| Step | What it does | Runs |
-| --- | --- | --- |
-| `generate` | Simulates a batch of frames: sky noise, a fixed sensor dark pattern with hot pixels, 20–35 stars, and a faint satellite streak in about 60% of frames. Saves ground truth. | once |
-| `calibrate` | Subtracts the master dark, removes the sky background and converts pixels to signal-to-noise. | once per frame, in parallel |
-| `detect` | Smooths, thresholds and groups pixels, then classifies each object by shape: round → star, long and thin → streak. Measures streak angle and length from second moments. | once per frame, in parallel |
-| `report` | Combines all detections and scores them against ground truth (precision, recall, angle error). | once |
+```mermaid
+flowchart LR
+    dev([git push]) --> test
+
+    subgraph ci [GitHub Actions]
+      test[test<br/>pytest, end-to-end run,<br/>argo lint] --> image[image<br/>build amd64 + arm64<br/>push to GHCR]
+      image --> release[release<br/>write new image tag<br/>into deploy/ and commit]
+    end
+
+    release -->|commit| git[(Git repo<br/>deploy/)]
+    image --> ghcr[(GHCR)]
+
+    subgraph k8s [Kubernetes cluster]
+      argocd[Argo CD] -->|sync| tmpl[WorkflowTemplate<br/>CronWorkflow, RBAC]
+      argocd -->|PostSync hook| smoke[smoke-test workflow]
+      smoke --> wf[Argo Workflows<br/>runs the pipeline]
+    end
+
+    git -->|watches| argocd
+    ghcr -->|pulls image| wf
+```
+
+1. **test** (every push and pull request): unit tests, a full pipeline run without Kubernetes, and `argo lint` on every manifest.
+2. **image** (`main` only): builds the image for `linux/amd64` and `linux/arm64` and pushes `ghcr.io/<owner>/argo-streak-detection:sha-<commit>`.
+3. **release** (`main` only): rewrites the single `image` line in `deploy/workflowtemplate.yaml` and commits it as `deploy: sha-<commit>`.
+4. **Argo CD** notices the commit, applies `deploy/` to the cluster, then starts the `streak-pipeline-smoke-test` workflow. The deployment counts as healthy only if that run succeeds.
+
+Nobody runs `kubectl apply` in production. Rolling back means reverting a commit.
+
+## What the pipeline does
 
 ```mermaid
 flowchart LR
@@ -24,123 +52,110 @@ flowchart LR
     G --> Cn[calibrate frame-N] --> Dn[detect frame-N] --> R
 ```
 
-The number of branches is not hard-coded. `generate` outputs the list of frames, and the workflow fans out over it with `withParam`, so a batch of 12 or 500 frames uses the same template.
+| Step | What it does | Runs |
+| --- | --- | --- |
+| `generate` | Simulates a batch of frames: sky noise, a fixed sensor dark pattern with hot pixels, 20–35 stars, and a faint satellite streak in about 60% of frames. Saves ground truth. | once |
+| `calibrate` | Subtracts the master dark, removes the sky background and converts pixels to signal-to-noise. | once per frame, in parallel |
+| `detect` | Smooths, thresholds and groups pixels, then classifies each object by shape: round → star, long and thin → streak. Measures streak angle and length from second moments. | once per frame, in parallel |
+| `report` | Combines all detections and scores them against ground truth (precision, recall, angle error). | once |
+
+The number of branches is not hard-coded: `generate` outputs the list of frames and the workflow fans out over it with `withParam`, so 12 or 500 frames use the same template.
 
 ## Results
 
-A 12-frame run (`--seed 42`):
+A 12-frame run (`--seed 42`) found all 7 simulated streaks with no false alarms and a mean angle error of 1.1°. Over 4 × 100 frames (seeds 1, 2, 3, 42) it found every streak with no false alarms and a mean angle error of 0.3–0.5°. Missed stars are faint ones below the threshold or overlapping pairs.
 
-| Frame | Streak in truth | Streak found | Angle error (deg) | Stars found / simulated |
-| --- | --- | --- | --- | --- |
-| frame-000 | no | no |  | 20 / 21 |
-| frame-001 | yes | yes | 0.0 | 28 / 30 |
-| frame-002 | no | no |  | 22 / 23 |
-| frame-003 | yes | yes | 0.1 | 29 / 32 |
-| frame-004 | yes | yes | 3.6 | 23 / 26 |
-| frame-005 | yes | yes | 0.0 | 24 / 24 |
-| frame-006 | yes | yes | 3.1 | 27 / 30 |
-| frame-007 | no | no |  | 27 / 27 |
-| frame-008 | yes | yes | 0.9 | 24 / 26 |
-| frame-009 | yes | yes | 0.2 | 32 / 32 |
-| frame-010 | no | no |  | 31 / 33 |
-| frame-011 | no | no |  | 25 / 27 |
+These numbers come from simulated data, which is far cleaner than real telescope images: no cosmic rays, clouds, saturated stars, crowded fields or tracking errors. The point of this project is the pipeline, its orchestration and its delivery, not a state-of-the-art detector.
 
-Streak precision 1.0, recall 1.0, mean angle error 1.1°. Over 4 × 100 frames (seeds 1, 2, 3, 42) the detector found every streak with no false alarms and a mean angle error of 0.3–0.5°. Missed stars are faint ones below the threshold or pairs that overlap.
+## Set it up
 
-These numbers come from simulated data, which is far cleaner than real telescope images: there are no cosmic rays, clouds, saturated stars, crowded fields or tracking errors. The point of this project is the pipeline and its orchestration, not a state-of-the-art detector.
+You need Docker, [kind](https://kind.sigs.k8s.io/), `kubectl` and a fork or copy of this repo on GitHub. Run `make help` to list every shortcut.
 
-## Run it locally (no Kubernetes)
+**1. Push the repo to GitHub.** The first CI run on `main` builds the image and commits the first `deploy:` change. Check the **Actions** tab.
+
+**2. Make the image public.** New GHCR packages are private, so the cluster cannot pull them. On GitHub, open your profile → **Packages** → `argo-streak-detection` → **Package settings** → **Change visibility** → **Public**. This is a one-time step.
+
+**3. Point Argo CD at your repo.** If your GitHub user is not `monstre0731`, edit `repoURL` in `argocd/application.yaml` and the image owner in `deploy/workflowtemplate.yaml`.
+
+**4. Create a cluster and install Argo Workflows and Argo CD.**
 
 ```bash
-pip install -r requirements.txt pytest
-python -m pytest -q
-python -m pipeline --data-dir ./out run-local --n-frames 12 --seed 42
-cat out/report.md
+kind create cluster --name day
+make argo-install          # Argo Workflows; UI with no login, for local use only
+make argocd-install        # Argo CD
+make argocd-app            # start GitOps: Argo CD now manages the pipeline in the argo namespace
 ```
 
-Preview images of every frame are written to `out/raw/*.png`.
-
-## Run it on Kubernetes with Argo Workflows
-
-Set up for a local [kind](https://kind.sigs.k8s.io/) cluster on macOS with Docker Desktop.
-
-**1. Install Argo Workflows** (skip if already installed)
+**5. Watch the first deployment.**
 
 ```bash
-kubectl create namespace argo
-kubectl apply -n argo --server-side --force-conflicts \
-  -f https://github.com/argoproj/argo-workflows/releases/latest/download/install.yaml
+make argocd-password       # admin password
+make argocd-ui             # https://localhost:8080 (user: admin; accept the self-signed certificate)
+make argo-ui               # http://localhost:2746, in another terminal
 ```
 
-`--server-side` is needed: the Argo CRDs are too large for a client-side apply.
+In Argo CD the `streak-pipeline` app turns **Synced** and **Healthy** once the smoke test finishes. In Argo Workflows, `streak-pipeline-smoke-test` shows the full DAG.
 
-**2. Build the image and load it into kind** (no registry needed)
+**6. Ship a change.** Edit something visible, for example `STREAK_MIN_LENGTH` in `pipeline/detect.py`, then:
 
 ```bash
-make kind-load          # docker build + kind load docker-image
+git commit -am "Tune streak length threshold" && git push
 ```
 
-**3. Install the permissions and the WorkflowTemplate**
+Within a few minutes: CI goes green, a `deploy: sha-…` commit appears, Argo CD syncs (it polls Git every 3 minutes; press **Refresh** to skip the wait) and a new smoke test runs with the new image. `make status` shows the deployed image and the latest runs.
+
+### Other ways to run it
 
 ```bash
-make deploy
+make run-local     # the whole pipeline in Python, no Kubernetes
+make submit        # a 12-frame run with the image Argo CD deployed
+make submit-local  # build your working copy, load it into kind, run it (try changes before pushing)
+make logs          # report of the latest run (needs: brew install argo)
 ```
-
-**4. Run the pipeline**
-
-```bash
-make submit             # or: argo submit -n argo --from workflowtemplate/streak-pipeline -p n-frames=40 --watch
-make watch              # step pods appear, run and complete
-make logs               # report of the latest run
-```
-
-**5. See it in the Argo UI**
-
-```bash
-make ui                 # then open http://localhost:2746
-```
-
-The UI shows the DAG: one `generate` node, a fan-out of `calibrate → detect` pairs, and `report` at the end.
-
-A nightly schedule is included in `k8s/cronworkflow.yaml`.
 
 ## Repository layout
 
 ```
-pipeline/                 Python package, one module per step
-  generate.py             simulate frames + ground truth
-  calibrate.py            dark subtraction, background, S/N
-  detect.py               segmentation + shape classification
-  report.py               batch summary and scoring
-  __main__.py             CLI: python -m pipeline <step>
-tests/                    unit tests and an end-to-end run
-k8s/
-  rbac.yaml               ServiceAccount + Role for workflow pods
-  workflowtemplate.yaml   the pipeline definition (DAG, fan-out, retries)
-  workflow.yaml           one run of the template
-  cronworkflow.yaml       optional nightly schedule
-Dockerfile                one image for every step
-Makefile                  build, deploy, run
-.github/workflows/ci.yaml tests, end-to-end run, image build to GHCR
+pipeline/                    Python package, one module per step
+  generate.py                simulate frames + ground truth
+  calibrate.py               dark subtraction, background, S/N
+  detect.py                  segmentation + shape classification
+  report.py                  batch summary and scoring
+  __main__.py                CLI: python -m pipeline <step>
+tests/                       unit tests and an end-to-end run
+deploy/                      everything Argo CD keeps in sync (Kustomize)
+  workflowtemplate.yaml      the pipeline: DAG, fan-out, retries (image tag set by CI)
+  cronworkflow.yaml          nightly run
+  smoke-test.yaml            PostSync hook: verifies every deployment
+  rbac.yaml                  ServiceAccount + Role for workflow pods
+argocd/application.yaml      connects Argo CD to deploy/
+examples/                    one-off runs (CI image or local image)
+.github/workflows/ci.yaml    test → image → release
+Dockerfile                   one image for every step
+Makefile                     setup and everyday commands
 ```
 
 ## Design notes
 
 - **One image, many steps.** Every step is a subcommand of the same image, so the Argo templates differ only in their `args`.
-- **Dynamic parallelism.** `generate` writes the frame list to a file that Argo reads as an output parameter; `withParam` creates one `process-frame` DAG per item. `parallelism: 6` caps how many step pods run at once.
-- **Shared working volume.** Steps exchange files through a per-workflow PersistentVolumeClaim (`volumeClaimTemplates`), deleted when the run finishes. On kind the local-path volume pins every step to one node, which is fine for a demo.
-- **Retries.** `detect` retries up to twice on failure.
-- **Clean stdout.** Steps log to stderr, so stdout only carries machine-readable output.
+- **Explicit `command`.** Argo's emissary executor needs each container's command. If a template leaves it out, Argo looks the image up in a registry, which fails for an image loaded straight into kind. So every template sets `command: [python, -m, pipeline]`.
+- **Dynamic parallelism.** `generate` writes the frame list to a file read as an output parameter; `withParam` creates one `calibrate → detect` DAG per frame. `parallelism: 6` caps concurrent pods.
+- **Shared working volume.** Steps exchange files through a per-workflow PersistentVolumeClaim, deleted when the run ends. On kind this pins a run to one node, which is fine for a demo.
+- **Immutable image tags.** Deployments reference `sha-<commit>`, never `latest`, so every running workflow can be traced to a commit.
+- **Small release commits.** CI changes one line with `sed` rather than rewriting YAML, so each `deploy:` commit is a one-line diff that is easy to review and revert.
+- **Deployment verified by a workflow.** The PostSync smoke test means a broken image shows up as a failed sync in Argo CD, not as a failure in the next nightly run.
+- **Multi-arch images.** QEMU + Buildx build `arm64` alongside `amd64`, so the same image runs on cloud nodes and on Apple-silicon laptops.
 
 ## From demo to production
 
 | This demo | In a production pipeline |
 | --- | --- |
 | Simulated frames | Real frames arriving in object storage (S3, Azure Blob), often FITS files |
-| Shared volume between steps | Argo artifacts backed by object storage, so steps can run on any node |
-| Classical thresholding | A trained detector running on GPU nodes (`nodeSelector` + `tolerations`, commented in the template) |
-| `kubectl create` by hand | An event (new files in a bucket) triggers the run, e.g. via Argo Events |
-| `make deploy` | Argo CD syncs the templates from Git |
+| Shared volume between steps | Argo artifacts in object storage, so steps can run on any node |
+| Classical thresholding | A trained detector on GPU nodes (`nodeSelector` + `tolerations`, commented in the template) |
+| Runs started by hand or by cron | Started by events, e.g. new files in a bucket via Argo Events |
+| Public image, no login on the Argo UI | Private registry with pull secrets, SSO on Argo CD and Argo Workflows |
+| One cluster | Separate dev and prod, promoted by moving the image tag through Git |
 | Logs in the pod | Centralised logs and metrics (Elasticsearch, Prometheus, Grafana) |
 
 ## Next steps
@@ -148,7 +163,7 @@ Makefile                  build, deploy, run
 - Pass files between steps as S3 artifacts (MinIO locally) instead of a shared volume
 - Make the simulation harder: cosmic rays, crowded fields, varying seeing, faster and fainter satellites
 - Link streaks across consecutive frames and fit a simple orbit
-- Deploy the WorkflowTemplate with Argo CD
+- Add a staging environment and promote releases with a pull request
 
 ## License
 

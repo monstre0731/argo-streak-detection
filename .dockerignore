@@ -5,3 +5,8 @@ tests
 docs
 **/__pycache__
 .pytest_cache
+deploy
+argocd
+examples
+Makefile
+README.md
