@@ -1,0 +1,139 @@
+# The reusable pipeline definition.
+#
+#   generate ──┬── process-frame(frame-000): calibrate → detect ──┐
+#              ├── process-frame(frame-001): calibrate → detect ──┼── report
+#              └── ... one branch per frame, created at run time ─┘
+#
+# The number of branches is not written here: `generate` outputs the list of
+# frames, and `withParam` fans out over it (dynamic parallelism).
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: streak-pipeline
+  namespace: argo
+spec:
+  serviceAccountName: argo-workflow
+  entrypoint: main
+  parallelism: 6                  # at most 6 step pods at the same time
+
+  arguments:
+    parameters:
+    - name: n-frames
+      value: "12"
+    - name: seed
+      value: "42"
+    - name: image
+      value: argo-streak-detection:0.1.0
+
+  # One shared volume per workflow run, mounted at /data in every step.
+  # On kind it is a local-path volume, so all steps are scheduled on the same node.
+  volumeClaimTemplates:
+  - metadata:
+      name: workdir
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 1Gi
+  volumeClaimGC:
+    strategy: OnWorkflowCompletion   # delete the volume when the run ends
+
+  templates:
+  - name: main
+    dag:
+      tasks:
+      - name: generate
+        template: generate
+      - name: process
+        depends: generate
+        template: process-frame
+        withParam: "{{tasks.generate.outputs.parameters.frames}}"
+        arguments:
+          parameters:
+          - name: frame
+            value: "{{item}}"
+      - name: report
+        depends: process
+        template: report
+
+  # A small DAG reused for every frame.
+  - name: process-frame
+    inputs:
+      parameters:
+      - name: frame
+    dag:
+      tasks:
+      - name: calibrate
+        template: calibrate
+        arguments:
+          parameters:
+          - name: frame
+            value: "{{inputs.parameters.frame}}"
+      - name: detect
+        depends: calibrate
+        template: detect
+        arguments:
+          parameters:
+          - name: frame
+            value: "{{inputs.parameters.frame}}"
+
+  - name: generate
+    container:
+      image: "{{workflow.parameters.image}}"
+      imagePullPolicy: IfNotPresent
+      command: [python, -m, pipeline]   # explicit, so Argo never looks the image up in a registry
+      args: [generate, --n-frames, "{{workflow.parameters.n-frames}}",
+             --seed, "{{workflow.parameters.seed}}", --frames-out, /tmp/frames.json]
+      volumeMounts:
+      - {name: workdir, mountPath: /data}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+    outputs:
+      parameters:
+      - name: frames                  # e.g. ["frame-000", "frame-001", ...]
+        valueFrom:
+          path: /tmp/frames.json
+
+  - name: calibrate
+    inputs:
+      parameters:
+      - name: frame
+    container:
+      image: "{{workflow.parameters.image}}"
+      imagePullPolicy: IfNotPresent
+      command: [python, -m, pipeline]   # explicit, so Argo never looks the image up in a registry
+      args: [calibrate, --frame, "{{inputs.parameters.frame}}"]
+      volumeMounts:
+      - {name: workdir, mountPath: /data}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+
+  - name: detect
+    inputs:
+      parameters:
+      - name: frame
+    retryStrategy:
+      limit: "2"                      # retry a failed detection up to twice
+    # In production this step would request a GPU and target GPU nodes:
+    # nodeSelector: {pool: gpu}
+    # tolerations: [{key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}]
+    container:
+      image: "{{workflow.parameters.image}}"
+      imagePullPolicy: IfNotPresent
+      command: [python, -m, pipeline]   # explicit, so Argo never looks the image up in a registry
+      args: [detect, --frame, "{{inputs.parameters.frame}}"]
+      volumeMounts:
+      - {name: workdir, mountPath: /data}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+
+  - name: report
+    container:
+      image: "{{workflow.parameters.image}}"
+      imagePullPolicy: IfNotPresent
+      command: [python, -m, pipeline]   # explicit, so Argo never looks the image up in a registry
+      args: [report]
+      volumeMounts:
+      - {name: workdir, mountPath: /data}
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}

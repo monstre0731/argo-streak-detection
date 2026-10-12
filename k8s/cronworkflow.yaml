@@ -1,0 +1,21 @@
+# Optional: run the pipeline automatically every night, like a real observing schedule.
+#   kubectl apply -f k8s/cronworkflow.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: nightly-streak-pipeline
+  namespace: argo
+spec:
+  schedules:
+  - "0 6 * * *"                  # every day at 06:00 UTC
+  timezone: UTC
+  concurrencyPolicy: Forbid      # skip if the previous run is still going
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  workflowSpec:
+    workflowTemplateRef:
+      name: streak-pipeline
+    arguments:
+      parameters:
+      - name: n-frames
+        value: "24"

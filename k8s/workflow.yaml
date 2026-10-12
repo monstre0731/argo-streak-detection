@@ -1,0 +1,16 @@
+# One run of the pipeline. Submit it as many times as you like:
+#   kubectl create -f k8s/workflow.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: streak-pipeline-
+  namespace: argo
+spec:
+  workflowTemplateRef:
+    name: streak-pipeline
+  arguments:
+    parameters:
+    - name: n-frames
+      value: "12"
+    - name: seed
+      value: "42"

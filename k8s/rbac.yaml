@@ -1,0 +1,31 @@
+# Identity the workflow pods run as, with the minimum permission Argo needs:
+# letting each step report its result back to the workflow controller.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: argo-workflow
+  namespace: argo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: workflow-executor
+  namespace: argo
+rules:
+- apiGroups: [argoproj.io]
+  resources: [workflowtaskresults]
+  verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argo-workflow-executor
+  namespace: argo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: workflow-executor
+subjects:
+- kind: ServiceAccount
+  name: argo-workflow
+  namespace: argo
