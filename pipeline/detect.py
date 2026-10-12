@@ -19,7 +19,7 @@ from .common import Layout, log, robust_sigma, save_json
 THRESHOLD = 5.0          # signal-to-noise after smoothing
 MIN_PIXELS = 5           # smaller groups are noise
 STREAK_ELONGATION = 3.0  # major axis / minor axis
-STREAK_MIN_LENGTH = 25.0  # pixels
+STREAK_MIN_LENGTH = 30.0  # pixels
 
 
 def measure(weights: np.ndarray, ys: np.ndarray, xs: np.ndarray) -> dict:
